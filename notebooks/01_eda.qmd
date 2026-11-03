@@ -12,46 +12,10 @@ library(scales)
 library(tidyverse)
 ```
 
-## Importing raw data
+## Importing raw data using `../load_data.R`
 ```{r}
-#| warning: FALSE
-habit_levels <- c("never", "less1", "1~3", "4~8", "gt8")
-
-col_factor <- readr::col_factor
-coupon_col_types <- cols(
-  # unordered categories (levels inferred from the data)
-  destination   = col_factor(),
-  passanger     = col_factor(),
-  weather       = col_factor(),
-  coupon        = col_factor(),
-  gender        = col_factor(),
-  maritalStatus = col_factor(),
-  occupation    = col_factor(),
-
-  # ordered categories (explicit levels)
-  time       = col_factor(c("7AM", "10AM", "2PM", "6PM", "10PM"), ordered = TRUE),
-  expiration = col_factor(c("2h", "1d"), ordered = TRUE),
-  age        = col_factor(c("below21", "21", "26", "31", "36", "41", "46", "50plus"), ordered = TRUE),
-  education  = col_factor(c("Some High School", "High School Graduate",
-                            "Some college - no degree", "Associates degree",
-                            "Bachelors degree", "Graduate degree (Masters or Doctorate)"),
-                          ordered = TRUE),
-  income     = col_factor(c("Less than $12500", "$12500 - $24999", "$25000 - $37499",
-                            "$37500 - $49999", "$50000 - $62499", "$62500 - $74999",
-                            "$75000 - $87499", "$87500 - $99999", "$100000 or More"),
-                          ordered = TRUE),
-  Bar                  = col_factor(habit_levels, ordered = TRUE),
-  CoffeeHouse          = col_factor(habit_levels, ordered = TRUE),
-  CarryAway            = col_factor(habit_levels, ordered = TRUE),
-  RestaurantLessThan20 = col_factor(habit_levels, ordered = TRUE),
-  Restaurant20To50     = col_factor(habit_levels, ordered = TRUE),
-  
-  temperature = col_integer(),
-  .default    = col_integer()   # Y, has_children, toCoupon_*, direction_*
-)
-
-raw_data <- read_csv("../data/raw/in-vehicle-coupon-recommendation-1.csv",
-                     col_types = coupon_col_types)
+source("../R/load_data.R")
+raw_data <- load_coupon_data()
 ```
 
 ```{r}

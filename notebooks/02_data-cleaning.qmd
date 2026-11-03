@@ -1,5 +1,193 @@
 ---
-title: "02_data-cleaning"
-format: html
+title: "02 - Data Cleaning"
+author: "BUS 445 - Team 3"
+format:
+  html:
+    code-fold: show
 ---
 
+# Purpose
+
+This notebook turns the raw survey file into one tidy dataset that every later notebook reads. It applies the decisions logged at the end of `01_eda.qmd`, and nothing else: raw data is never modified, and the output is written to `data/processed/`.
+
+Judgment calls are collected in one place (see **Decisions** below) so the team can review and change them.
+
+```{r}
+#| warning: false
+library(tidyverse)
+source("../R/load_data.R")
+
+raw_data <- load_coupon_data()
+problems(raw_data)   # should be empty
+```
+
+```{r}
+n_raw <- nrow(raw_data)
+cat("Raw data:", n_raw, "rows,", ncol(raw_data), "columns\n")
+```
+
+# Decisions (edit here)
+
+```{r}
+# Habit columns have ~1-2% missing each (605 rows, 4.8%, have at least one).
+#   "drop" = remove those rows (default; keeps habits as clean ordered factors)
+#   "keep" = leave them as NA and handle in modelling
+habit_na_strategy <- "drop"
+```
+
+# 1. Remove columns with no information
+
+Each drop is backed by a check, so the notebook fails loudly if the data ever changes.
+
+```{r}
+# toCoupon_GEQ5min: same value in every row
+stopifnot(n_distinct(raw_data$toCoupon_GEQ5min) == 1)
+
+# direction_opp is the exact opposite of direction_same
+stopifnot(all(raw_data$direction_same + raw_data$direction_opp == 1))
+
+# distance flags are nested: > 25 min implies > 15 min
+stopifnot(!any(raw_data$toCoupon_GEQ25min == 1 & raw_data$toCoupon_GEQ15min == 0))
+
+# car: almost entirely empty
+cat("car is missing in", scales::percent(mean(is.na(raw_data$car)), accuracy = 0.1), "of rows\n")
+```
+
+# 2. Combine the geospatial flags into readable variables
+
+The three nested distance flags (the always-1 `GEQ5min` plus `GEQ15min` and `GEQ25min`) become one ordered `distance`. The two direction flags become one `direction`. Nothing is lost.
+
+```{r}
+clean <- raw_data |>
+  mutate(
+    distance = case_when(
+      toCoupon_GEQ25min == 1 ~ "Over 25 min",
+      toCoupon_GEQ15min == 1 ~ "15-25 min",
+      TRUE                   ~ "5-15 min"
+    ) |> factor(levels = c("5-15 min", "15-25 min", "Over 25 min"), ordered = TRUE),
+    direction = factor(if_else(direction_same == 1, "Same direction", "Opposite direction"),
+                       levels = c("Same direction", "Opposite direction"))
+  ) |>
+  select(-car, -toCoupon_GEQ5min, -toCoupon_GEQ15min, -toCoupon_GEQ25min,
+         -direction_same, -direction_opp)
+
+count(clean, distance)
+count(clean, direction)
+```
+
+# 3. Rename columns and relabel levels
+
+Column names move to one style (`snake_case`, `passanger` typo fixed). Compact codes become readable labels, with the same wording used in the EDA charts. Ordered factors stay ordered.
+
+```{r}
+habit_levels <- c("never", "less1", "1~3", "4~8", "gt8")
+habit_labels <- c("Never", "Less than 1", "1-3", "4-8", "More than 8")
+
+clean <- clean |>
+  rename(
+    passenger             = passanger,
+    marital_status        = maritalStatus,
+    bar_freq              = Bar,
+    coffee_house_freq     = CoffeeHouse,
+    carry_away_freq       = CarryAway,
+    restaurant_lt20_freq  = RestaurantLessThan20,
+    restaurant_20_50_freq = Restaurant20To50
+  ) |>
+  mutate(
+    # unordered
+    coupon = fct_recode(coupon,
+                        "Take-away"              = "Carry out & Take away",
+                        "Restaurant (under $20)" = "Restaurant(<20)",
+                        "Restaurant ($20-50)"    = "Restaurant(20-50)"),
+    has_children = factor(has_children, levels = c(0, 1), labels = c("No", "Yes")),
+
+    # ordered
+    expiration = factor(expiration, levels = c("2h", "1d"),
+                        labels = c("2 hours", "1 day"), ordered = TRUE),
+    age = factor(age,
+                 levels = c("below21", "21", "26", "31", "36", "41", "46", "50plus"),
+                 labels = c("Under 21", "21-25", "26-30", "31-35", "36-40", "41-45", "46-49", "50+"),
+                 ordered = TRUE),
+    across(ends_with("_freq"),
+           \(x) factor(x, levels = habit_levels, labels = habit_labels, ordered = TRUE))
+  )
+
+glimpse(clean)
+```
+
+# 4. Respondent proxy ID
+
+The file has no respondent ID, but each person appears in many rows (about 20). Rows from the same person are not independent, so a random row-level train/test split would leak. We build a proxy ID from the respondent-level columns (demographics plus habits), computed **before** any rows are dropped. If two real people share an identical profile they get the same ID, which is the safe direction for grouped splitting.
+
+> `respondent_id` is only for grouping or splitting. Never use it as a predictor.
+
+```{r}
+clean <- clean |>
+  group_by(across(c(gender, age, marital_status, has_children, education,
+                    occupation, income, ends_with("_freq")))) |>
+  mutate(respondent_id = cur_group_id()) |>
+  ungroup()
+
+cat("Distinct respondent profiles:", n_distinct(clean$respondent_id), "\n")
+```
+
+# 5. Missing habit values
+
+See the missingness section of `01_eda.qmd`. Only a small share of rows is affected and a missing habit cannot be reliably imputed, so the default is to drop those rows. Missing values also look mildly related to acceptance (for example, rows with `Bar` missing accepted at about 51% vs 57% otherwise), so the dropped share is reported below, and the strategy is a one-line switch at the top if the team wants a sensitivity check.
+
+```{r}
+n_before <- nrow(clean)
+
+if (habit_na_strategy == "drop") {
+  clean <- clean |> drop_na(ends_with("_freq"))
+}
+
+cat("Habit NA strategy:", habit_na_strategy, "\n",
+    "Rows removed:", n_before - nrow(clean),
+    scales::percent((n_before - nrow(clean)) / n_before, accuracy = 0.1, prefix = "("),
+    ")\n")
+```
+
+# 6. Duplicates
+
+There is no respondent ID, so two identical rows could be two different people with the same profile answering the same scenario. We keep them and report the count.
+
+```{r}
+cat("Fully duplicated rows kept:", sum(duplicated(clean)), "\n")
+```
+
+# 7. Validate and save
+
+```{r}
+stopifnot(
+  all(clean$Y %in% 0:1),
+  is.ordered(clean$time), is.ordered(clean$age), is.ordered(clean$income),
+  is.ordered(clean$education), is.ordered(clean$expiration), is.ordered(clean$distance),
+  is.ordered(clean$bar_freq),
+  !any(c("car", "toCoupon_GEQ5min", "passanger") %in% names(clean))
+)
+if (habit_na_strategy == "drop") stopifnot(sum(is.na(clean)) == 0)
+
+cat("Clean data:", nrow(clean), "rows,", ncol(clean), "columns\n",
+    "Acceptance rate:", scales::percent(mean(clean$Y), accuracy = 0.1), "\n")
+```
+
+Saved as `.rds` rather than `.csv` so the factor types and level order survive.
+
+```{r}
+dir.create("../data/processed", showWarnings = FALSE, recursive = TRUE)
+write_rds(clean, "../data/processed/coupon_clean.rds")
+```
+
+# Summary of changes
+
+| Step | Change |
+|---|---|
+| Drop | `car` (99% missing), `toCoupon_GEQ5min` (constant), the raw distance and direction flags |
+| Create | `distance` (ordered), `direction`, `respondent_id` (proxy) |
+| Rename | `passanger` to `passenger`, camelCase to `snake_case`, habit columns end in `_freq` |
+| Relabel | coupon names, `expiration`, `age`, habit bands, `has_children` |
+| Rows | Habit NAs dropped (default); duplicates kept |
+| Output | `data/processed/coupon_clean.rds` |
+
+Not done here, on purpose: collapsing rare `occupation` levels, encoding for models, and train/test splitting. Those belong in a feature-engineering or modelling notebook.
