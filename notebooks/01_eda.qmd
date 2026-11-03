@@ -1,0 +1,271 @@
+---
+title: "01 - Exploratory Data Analysis (EDA)"
+author: "BUS 445 - Team 3"
+format: 
+  html: 
+    code-fold: true # this hides code by default; more emphasis on the business-relevant graphics
+---
+## Library imports
+```{r}
+#| warning: FALSE
+library(scales)
+library(tidyverse)
+library(dplyr)
+```
+
+## Importing raw data
+```{r}
+#| warning: FALSE
+habit_levels <- c("never", "less1", "1~3", "4~8", "gt8")
+
+col_factor <- readr::col_factor
+coupon_col_types <- cols(
+  # unordered categories (levels inferred from the data)
+  destination   = col_factor(),
+  passanger     = col_factor(),
+  weather       = col_factor(),
+  coupon        = col_factor(),
+  gender        = col_factor(),
+  maritalStatus = col_factor(),
+  occupation    = col_factor(),
+
+  # ordered categories (explicit levels)
+  time       = col_factor(c("7AM", "10AM", "2PM", "6PM", "10PM"), ordered = TRUE),
+  expiration = col_factor(c("2h", "1d"), ordered = TRUE),
+  age        = col_factor(c("below21", "21", "26", "31", "36", "41", "46", "50plus"), ordered = TRUE),
+  education  = col_factor(c("Some High School", "High School Graduate",
+                            "Some college - no degree", "Associates degree",
+                            "Bachelors degree", "Graduate degree (Masters or Doctorate)"),
+                          ordered = TRUE),
+  income     = col_factor(c("Less than $12500", "$12500 - $24999", "$25000 - $37499",
+                            "$37500 - $49999", "$50000 - $62499", "$62500 - $74999",
+                            "$75000 - $87499", "$87500 - $99999", "$100000 or More"),
+                          ordered = TRUE),
+  Bar                  = col_factor(habit_levels, ordered = TRUE),
+  CoffeeHouse          = col_factor(habit_levels, ordered = TRUE),
+  CarryAway            = col_factor(habit_levels, ordered = TRUE),
+  RestaurantLessThan20 = col_factor(habit_levels, ordered = TRUE),
+  Restaurant20To50     = col_factor(habit_levels, ordered = TRUE),
+  
+  temperature = col_integer(),
+  .default    = col_integer()   # Y, has_children, toCoupon_*, direction_*
+)
+
+raw_data <- read_csv("../data/raw/in-vehicle-coupon-recommendation-1.csv",
+                     col_types = coupon_col_types)
+```
+
+```{r}
+dim(raw_data)
+```
+
+## Checking the data quality:
+```{r}
+# Target balance
+raw_data |> count(Y) |> mutate(pct = percent(n / sum(n), accuracy = 0.1))
+
+# Duplicates
+sum(duplicated(raw_data))
+
+# Missing habit values: how many, and does it relate to acceptance?
+raw_data |>
+  summarise(across(all_of(consumption_habit), \(x) sum(is.na(x)))) |>
+  pivot_longer(everything(), names_to = "habit", values_to = "n_missing")
+
+raw_data |>
+  mutate(any_habit_missing = if_any(all_of(consumption_habit), is.na)) |>
+  group_by(any_habit_missing) |>
+  summarise(n = n(), accept_rate = mean(Y))
+
+# Redundancy check you mention in text
+all(raw_data$direction_same + raw_data$direction_opp == 1)
+```
+
+## Baseline setup:
+```{r}
+overall <- mean(raw_data$Y)        # 56.8% baseline acceptance
+blue <- "#2a78d6"; red <- "#e34948"
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title.position = "plot",
+          plot.title = element_text(face = "bold"))
+)
+```
+
+## Simple Exploration:
+We have 12684 observations, and 26 features. From the dataset description document, we are told that the features fall into one of the four following categories:
+
+1. Scenario-Level (same per-scenario across all individuals)
+2. Respondent-Level (same per-person across all scenarios)
+3. Consumption-Habit
+4. Geospatial (Factors)
+
+I would like to put the features into these groups for now:
+```{r}
+colnames(raw_data)
+```
+
+```{r}
+scenario_level <- c("destination", "passanger", "weather", "temperature", "time", "coupon", "expiration")
+respondent_level <- c("gender", "age", "maritalStatus", "has_children", "education", "occupation", "income")
+consumption_habit <- c("Bar", "CoffeeHouse", "CarryAway", "RestaurantLessThan20", "Restaurant20To50")
+geospatial_factors <- c("toCoupon_GEQ5min", "toCoupon_GEQ15min", "toCoupon_GEQ25min", "direction_same", "direction_opp")
+```
+
+There is a note that all `toCoupon_GEQ5min` are the same in the dataset so we can drop it (since it won't provide any additional value). We can check that quickly:
+
+```{r}
+table(raw_data$toCoupon_GEQ5min)
+```
+Note: We might also want to consider the redundancy of having both `direction_same` and `direction_opp`, as it may be redundant - `direction_same` is always $\neq$ `direction_opp`.
+
+I would like to check the levels of the consumption habits:
+```{r}
+# Consumption Frequency
+for (loc in consumption_habit){
+  cat(sprintf("\n%s:", loc))
+  print(table(raw_data[[loc]]))
+}
+```
+
+
+## Visualizations:
+We now present some charts that give insights into the survey data.
+
+From our above table, now visually:
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+habit_levels <- c("never", "less1", "1~3", "4~8", "gt8")
+habit_labels <- c("Never", "Less than 1", "1-3", "4-8", "More than 8")
+
+loc_labels  <- c(Bar = "Bar", CoffeeHouse = "Coffee house", CarryAway = "Take-away",
+                 RestaurantLessThan20 = "Restaurant (under $20)",
+                 Restaurant20To50 = "Restaurant ($20-50)")
+loc_colours <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+
+raw_data |>
+  select(all_of(consumption_habit)) |>
+  pivot_longer(everything(), names_to = "location", values_to = "response") |>
+  mutate(location = factor(location, levels = consumption_habit),
+         response = factor(response, levels = habit_levels, labels = habit_labels),
+         response = fct_na_value_to_level(response, level = "Missing")) |>
+  ggplot(aes(x = response, fill = location)) +
+  geom_bar(position = position_dodge(width = 0.8), width = 0.75,
+           colour = "white", linewidth = 0.3) +
+  scale_fill_manual(values = loc_colours, labels = loc_labels, name = NULL) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
+  guides(fill = guide_legend(nrow = 1)) +
+  labs(title = "Most people rarely visit bars, but take-away and cheap restaurants are regular habits",
+       subtitle = "How many times per month respondents say they visit each type of place",
+       x = "Visits per month", y = "Number of survey rows",
+       caption = "Each respondent appears in about 20 rows, so counts reflect rows, not unique people.") +
+  theme(legend.position = "top",
+        panel.grid.major.x = element_blank())
+```
+
+Q1) Which coupons get accepted?:
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+raw_data |>
+  group_by(coupon) |>
+  summarise(rate = mean(Y)) |>
+  ggplot(aes(x = rate, y = fct_reorder(coupon, rate))) +
+  geom_col(fill = blue, width = 0.6) +
+  geom_vline(xintercept = overall, linetype = "dashed") +
+  geom_text(aes(label = percent(rate, accuracy = 1)),
+            hjust = 1.15, colour = "white", fontface = "bold") +
+  annotate("text", x = overall, y = 5.6, label = "Average: 57%", hjust = -0.1, size = 3.5) +
+  scale_x_continuous(labels = percent, limits = c(0, 0.85)) +
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.8))) +
+  labs(title = str_wrap("Take-away and cheap-restaurant coupons are accepted most; bars least", 55),
+       subtitle = "Share of scenarios where the coupon was accepted",
+       x = NULL, y = NULL)
+```
+
+Q2) Which features influence coupon acceptance?
+```{r}
+#| fig-height: 9
+scenario_vars <- c("coupon", "destination", "passanger", "weather", "time",
+                   "expiration", "toCoupon_GEQ15min", "toCoupon_GEQ25min", "direction_same")
+
+raw_data |>
+  mutate(across(all_of(scenario_vars), as.character)) |>
+  pivot_longer(all_of(scenario_vars), names_to = "variable", values_to = "level") |>
+  group_by(variable, level) |>
+  summarise(diff = mean(Y) - overall, .groups = "drop") |>
+  mutate(label = paste(variable, "=", level)) |>
+  ggplot(aes(x = diff, y = fct_reorder(label, diff), fill = diff > 0)) +
+  geom_col(width = 0.7) +
+  geom_vline(xintercept = 0) +
+  scale_fill_manual(values = c("TRUE" = blue, "FALSE" = red), guide = "none") +
+  scale_x_continuous(labels = \(x) sprintf("%+.0f", x * 100)) +
+  labs(title = "Context matters: weather, distance, coupon type and expiry all shift acceptance",
+       subtitle = "Percentage points above (blue) or below (red) the 57% average",
+       x = NULL, y = NULL)
+```
+
+Q3) Interaction Between Features
+```{r}
+raw_data |>
+  group_by(coupon, time) |>
+  summarise(rate = mean(Y), n = n(), .groups = "drop") |>
+  filter(n >= 30) |>                      # skip tiny cells
+  ggplot(aes(time, coupon, fill = rate)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = percent(rate, accuracy = 1), colour = rate > 0.65)) +
+  scale_fill_gradient(low = "#cde2fb", high = "#184f95", labels = percent, name = "Accepted") +
+  scale_colour_manual(values = c("TRUE" = "white", "FALSE" = "black"), guide = "none") +
+  labs(title = "When you offer matters as much as what you offer", x = NULL, y = NULL)
+```
+Q6) Coupon Acceptance Based on Habits
+```{r}
+#| fig-width: 12
+#| fig-height: 3.5
+raw_data |>
+  mutate(matched_habit = case_when(
+    coupon == "Bar"                   ~ as.character(Bar),
+    coupon == "Coffee House"          ~ as.character(CoffeeHouse),
+    coupon == "Carry out & Take away" ~ as.character(CarryAway),
+    coupon == "Restaurant(<20)"       ~ as.character(RestaurantLessThan20),
+    coupon == "Restaurant(20-50)"     ~ as.character(Restaurant20To50))) |>
+  filter(!is.na(matched_habit)) |>
+  mutate(matched_habit = factor(matched_habit, levels = c("never", "less1", "1~3", "4~8", "gt8"))) |>
+  group_by(coupon, matched_habit) |>
+  summarise(rate = mean(Y), .groups = "drop") |>
+  ggplot(aes(matched_habit, rate)) +
+  geom_col(fill = blue, width = 0.7) +
+  geom_hline(yintercept = overall, linetype = "dashed") +
+  scale_y_continuous(labels = percent) +
+  facet_wrap(~ coupon, nrow = 1) +
+  labs(title = "People accept coupons for places they already visit",
+       x = "How often they visit that type of place (per month)", y = "Accepted")
+```
+
+Lastly, we would like to check which options we have for the various combinations from the survey:
+```{r}
+raw_data |>
+  count(destination, time) |>
+  complete(destination, time, fill = list(n = 0)) |>
+  ggplot(aes(time, destination, fill = n)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = n)) +
+  scale_fill_gradient(low = "#f0efec", high = "#6da7ec", guide = "none") +
+  labs(title = "Not every context was tested together", x = NULL, y = NULL)
+```
+
+From this, we note that we only evaluated `Work` at `7am`, `Home` and `10pm` or `6pm`, and `No Urgent Place` was never evaluated at `7am`.
+
+## Takeaways for `02-data_cleaning.qmd`:
+- Drop `car` (99% missing) and `toCoupon_GEQ5min` (constant).
+- Drop one of `direction_same` / `direction_opp` (always sum to 1).
+- Habit NAs (605 rows with at least one): decide drop vs. "Unknown" category; justify using the missingness check above.
+- 74 duplicate rows: decide keep/drop (no respondent ID, so they may be legitimate).
+- Set ordered factors: habits, `age`, `income`, `education`, `time`, `expiration`; plain factors for the rest.
+- Relabel codes: `1d`/`2h`, `less1`/`gt8`, coupon names, `passanger` → `passenger`; standardize column naming.
+- Consider ordered distance (<15, 15-25, >25 min) from the nested `GEQ15`/`GEQ25` flags.
+- Rare levels (e.g. some `occupation` categories): decide on collapsing later.
+- Modeling caveat: no respondent ID (~567 distinct profiles), so split train/test by respondent profile, not by row.
