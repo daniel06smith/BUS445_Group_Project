@@ -10,7 +10,6 @@ format:
 #| warning: FALSE
 library(scales)
 library(tidyverse)
-library(dplyr)
 ```
 
 ## Importing raw data
@@ -59,41 +58,6 @@ raw_data <- read_csv("../data/raw/in-vehicle-coupon-recommendation-1.csv",
 dim(raw_data)
 ```
 
-## Checking the data quality:
-```{r}
-# Target balance
-raw_data |> count(Y) |> mutate(pct = percent(n / sum(n), accuracy = 0.1))
-
-# Duplicates
-sum(duplicated(raw_data))
-
-# Missing habit values: how many, and does it relate to acceptance?
-raw_data |>
-  summarise(across(all_of(consumption_habit), \(x) sum(is.na(x)))) |>
-  pivot_longer(everything(), names_to = "habit", values_to = "n_missing")
-
-raw_data |>
-  mutate(any_habit_missing = if_any(all_of(consumption_habit), is.na)) |>
-  group_by(any_habit_missing) |>
-  summarise(n = n(), accept_rate = mean(Y))
-
-# Redundancy check you mention in text
-all(raw_data$direction_same + raw_data$direction_opp == 1)
-```
-
-## Baseline setup:
-```{r}
-overall <- mean(raw_data$Y)        # 56.8% baseline acceptance
-blue <- "#2a78d6"; red <- "#e34948"
-
-theme_set(
-  theme_minimal(base_size = 13) +
-    theme(panel.grid.minor = element_blank(),
-          plot.title.position = "plot",
-          plot.title = element_text(face = "bold"))
-)
-```
-
 ## Simple Exploration:
 We have 12684 observations, and 26 features. From the dataset description document, we are told that the features fall into one of the four following categories:
 
@@ -128,6 +92,41 @@ for (loc in consumption_habit){
   cat(sprintf("\n%s:", loc))
   print(table(raw_data[[loc]]))
 }
+```
+
+## Checking the data quality:
+```{r}
+# Target balance
+raw_data |> count(Y) |> mutate(pct = percent(n / sum(n), accuracy = 0.1))
+
+# Duplicates
+sum(duplicated(raw_data))
+
+# Missing habit values: how many, and does it relate to acceptance?
+raw_data |>
+  summarise(across(all_of(consumption_habit), \(x) sum(is.na(x)))) |>
+  pivot_longer(everything(), names_to = "habit", values_to = "n_missing")
+
+raw_data |>
+  mutate(any_habit_missing = if_any(all_of(consumption_habit), is.na)) |>
+  group_by(any_habit_missing) |>
+  summarise(n = n(), accept_rate = mean(Y))
+
+# Redundancy check you mention in text
+all(raw_data$direction_same + raw_data$direction_opp == 1)
+```
+
+## Baseline setup:
+```{r}
+overall <- mean(raw_data$Y)        # 56.8% baseline acceptance
+blue <- "#2a78d6"; red <- "#e34948"
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title.position = "plot",
+          plot.title = element_text(face = "bold"))
+)
 ```
 
 
