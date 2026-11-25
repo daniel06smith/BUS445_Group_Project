@@ -2,10 +2,12 @@
 title: "01 - Exploratory Data Analysis (EDA)"
 author: "BUS 445 - Team 3"
 format: 
-  html: 
+  pdf: 
     code-fold: true # this hides code by default; more emphasis on the business-relevant graphics
 ---
+
 ## Library imports
+
 ```{r}
 #| warning: FALSE
 library(scales)
@@ -13,6 +15,7 @@ library(tidyverse)
 ```
 
 ## Importing raw data using `../load_data.R`
+
 ```{r}
 source("../R/load_data.R")
 raw_data <- load_coupon_data()
@@ -23,14 +26,16 @@ dim(raw_data)
 ```
 
 ## Simple Exploration:
+
 We have 12684 observations, and 26 features. From the dataset description document, we are told that the features fall into one of the four following categories:
 
-1. Scenario-Level (same per-scenario across all individuals)
-2. Respondent-Level (same per-person across all scenarios)
-3. Consumption-Habit
-4. Geospatial (Factors)
+1.  Scenario-Level (same per-scenario across all individuals)
+2.  Respondent-Level (same per-person across all scenarios)
+3.  Consumption-Habit
+4.  Geospatial (Factors)
 
 I would like to put the features into these groups for now:
+
 ```{r}
 colnames(raw_data)
 ```
@@ -47,9 +52,11 @@ There is a note that all `toCoupon_GEQ5min` are the same in the dataset so we ca
 ```{r}
 table(raw_data$toCoupon_GEQ5min)
 ```
+
 Note: We might also want to consider the redundancy of having both `direction_same` and `direction_opp`, as it may be redundant - `direction_same` is always $\neq$ `direction_opp`.
 
 I would like to check the levels of the consumption habits:
+
 ```{r}
 # Consumption Frequency
 for (loc in consumption_habit){
@@ -59,6 +66,7 @@ for (loc in consumption_habit){
 ```
 
 ## Checking the data quality:
+
 ```{r}
 # Target balance
 raw_data |> count(Y) |> mutate(pct = percent(n / sum(n), accuracy = 0.1))
@@ -81,6 +89,7 @@ all(raw_data$direction_same + raw_data$direction_opp == 1)
 ```
 
 ## Baseline setup:
+
 ```{r}
 overall <- mean(raw_data$Y)        # 56.8% baseline acceptance
 blue <- "#2a78d6"; red <- "#e34948"
@@ -93,11 +102,12 @@ theme_set(
 )
 ```
 
-
 ## Visualizations:
+
 We now present some charts that give insights into the survey data.
 
 From our above table, now visually:
+
 ```{r}
 #| fig-width: 10
 #| fig-height: 5
@@ -130,6 +140,7 @@ raw_data |>
 ```
 
 Q1) Which coupons get accepted?:
+
 ```{r}
 #| fig-width: 8
 #| fig-height: 4
@@ -150,6 +161,7 @@ raw_data |>
 ```
 
 Q2) Which features influence coupon acceptance?
+
 ```{r}
 #| fig-height: 9
 scenario_vars <- c("coupon", "destination", "passanger", "weather", "time",
@@ -172,6 +184,7 @@ raw_data |>
 ```
 
 Q3) Interaction Between Features
+
 ```{r}
 raw_data |>
   group_by(coupon, time) |>
@@ -184,7 +197,9 @@ raw_data |>
   scale_colour_manual(values = c("TRUE" = "white", "FALSE" = "black"), guide = "none") +
   labs(title = "When you offer matters as much as what you offer", x = NULL, y = NULL)
 ```
+
 Q6) Coupon Acceptance Based on Habits
+
 ```{r}
 #| fig-width: 12
 #| fig-height: 3.5
@@ -209,6 +224,7 @@ raw_data |>
 ```
 
 Lastly, we would like to check which options we have for the various combinations from the survey:
+
 ```{r}
 raw_data |>
   count(destination, time) |>
@@ -223,12 +239,13 @@ raw_data |>
 From this, we note that we only evaluated `Work` at `7am`, `Home` and `10pm` or `6pm`, and `No Urgent Place` was never evaluated at `7am`.
 
 ## Takeaways for `02-data_cleaning.qmd`:
+
 - Drop `car` (99% missing) and `toCoupon_GEQ5min` (constant).
 - Drop one of `direction_same` / `direction_opp` (always sum to 1).
 - Habit NAs (605 rows with at least one): decide drop vs. "Unknown" category; justify using the missingness check above.
 - 74 duplicate rows: decide keep/drop (no respondent ID, so they may be legitimate).
 - Set ordered factors: habits, `age`, `income`, `education`, `time`, `expiration`; plain factors for the rest.
 - Relabel codes: `1d`/`2h`, `less1`/`gt8`, coupon names, `passanger` → `passenger`; standardize column naming.
-- Consider ordered distance (<15, 15-25, >25 min) from the nested `GEQ15`/`GEQ25` flags.
+- Consider ordered distance (\<15, 15-25, \>25 min) from the nested `GEQ15`/`GEQ25` flags.
 - Rare levels (e.g. some `occupation` categories): decide on collapsing later.
-- Modeling caveat: no respondent ID (~567 distinct profiles), so split train/test by respondent profile, not by row.
+- Modeling caveat: no respondent ID (\~567 distinct profiles), so split train/test by respondent profile, not by row.
