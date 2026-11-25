@@ -1,0 +1,146 @@
+---
+title: "03 - Feature Engineering and Respondent-Level Split"
+author: "BUS 445 - Team 3"
+format:
+  html:
+    code-fold: show
+---
+
+# Purpose
+
+This notebook adds the features our sponsor's feedback asked for, then splits the data **by respondent** so that no person appears in both training and test. It reads `data/processed/coupon_clean.rds` (from `02_data-cleaning.qmd`) and writes `data/processed/coupon_features.rds`.
+
+```{r}
+#| warning: false
+library(tidyverse)
+
+clean <- read_rds("../data/processed/coupon_clean.rds")
+cat("Input:", nrow(clean), "rows,", ncol(clean), "columns\n")
+```
+
+# 1. Which fields we keep (and which we set aside)
+
+The feedback told us to build the model on the **levers the product controls** (coupon, expiration, time, destination, passenger, weather, distance, direction) plus the **habit columns**, instead of "all the fields". Two checks support that.
+
+**Temperature is redundant with weather.** Every Rainy row is 55F and every Snowy row is 30F, so temperature only adds information inside Sunny rows.
+
+```{r}
+clean |> count(weather, temperature) |> pivot_wider(names_from = temperature, values_from = n, values_fill = 0)
+```
+
+**Demographics are not levers.** Momentum cannot choose a driver's age or income, so they are kept for the backup question ("which driver profiles does each category reach?") and are not in the main model.
+
+```{r}
+scenario_levers <- c("coupon", "expiration", "time", "destination", "passenger", "weather")
+```
+
+# 2. Habit-match feature
+
+Each coupon is linked to the habit column for the same type of place (a Bar coupon uses `bar_freq`, a Coffee House coupon uses `coffee_house_freq`, and so on). `habit_match` answers: **how often does this driver already visit this kind of place?**
+
+```{r}
+habit_levels <- levels(clean$bar_freq)   # Never < Less than 1 < 1-3 < 4-8 < More than 8
+
+features <- clean |>
+  mutate(
+    habit_match = case_when(
+      coupon == "Bar"                    ~ as.character(bar_freq),
+      coupon == "Coffee House"           ~ as.character(coffee_house_freq),
+      coupon == "Take-away"              ~ as.character(carry_away_freq),
+      coupon == "Restaurant (under $20)" ~ as.character(restaurant_lt20_freq),
+      coupon == "Restaurant ($20-50)"    ~ as.character(restaurant_20_50_freq)
+    ) |> factor(levels = habit_levels, ordered = TRUE)
+  )
+
+stopifnot(!anyNA(features$habit_match))
+
+features |>
+  group_by(coupon, habit_match) |>
+  summarise(n = n(), accept = mean(Y), .groups = "drop") |>
+  mutate(accept = scales::percent(accept, accuracy = 1)) |>
+  pivot_wider(names_from = habit_match, values_from = c(accept, n))
+```
+
+# 3. Detour flag and distance band
+
+`distance` (three bands) already exists from `02`. The **detour** flag marks offers that are far (over 15 minutes) *and* in the opposite direction of travel.
+
+Important detail: **every offer over 25 minutes away is also in the opposite direction.** So the "Over 25 min" band is entirely detours, and the detour flag and the distance band overlap. The model therefore uses `distance` and `detour` together and does not add `direction` separately (direction on its own barely matters for near offers).
+
+```{r}
+features <- features |>
+  mutate(detour = factor(distance != "5-15 min" & direction == "Opposite direction",
+                         levels = c(FALSE, TRUE), labels = c("No detour", "Detour")))
+
+with(features, table(distance, direction))
+features |> group_by(distance, detour) |> summarise(n = n(), accept = mean(Y), .groups = "drop")
+```
+
+# 4. Context cell
+
+A **context cell** is coupon x time x destination, the unit Dana will actually decide on.
+
+```{r}
+features <- features |>
+  mutate(cell = paste(coupon, time, destination, sep = " | "))
+
+cell_sizes <- features |> count(cell, name = "n_rows")
+cat("Context cells:", nrow(cell_sizes), "\n")
+cat("Cells with fewer than 30 rows:", sum(cell_sizes$n_rows < 30), "\n")
+summary(cell_sizes$n_rows)
+```
+
+Time and destination are partly nested in the survey design (Work only appears at 7AM; Home only at 6PM and 10PM), so some coupon x time x destination combinations never exist. We only report cells that exist.
+
+# 5. Split by respondent
+
+`respondent_id` is a proxy built in `02` from demographics and habits. Rows from one person must stay together, so we assign **whole respondents** to groups:
+
+- `split`: 80% train, 20% test. The test set is used **once**, at the end of `05_models.qmd`.
+- `fold`: five groups inside train, for cross-validation. Test rows get `NA`.
+
+```{r}
+set.seed(445)
+
+ids <- tibble(respondent_id = sort(unique(features$respondent_id))) |>
+  mutate(split = sample(c("train", "test"), n(), replace = TRUE, prob = c(0.8, 0.2)))
+
+train_ids <- ids |> filter(split == "train") |>
+  mutate(fold = sample(rep_len(1:5, n())))
+
+ids <- ids |> left_join(train_ids |> select(respondent_id, fold), by = "respondent_id")
+
+features <- features |>
+  left_join(ids, by = "respondent_id") |>
+  mutate(split = factor(split, levels = c("train", "test")))
+
+features |> group_by(split) |>
+  summarise(respondents = n_distinct(respondent_id), rows = n(), accept = mean(Y))
+
+# no respondent appears in both sets
+stopifnot(
+  length(intersect(features$respondent_id[features$split == "train"],
+                   features$respondent_id[features$split == "test"])) == 0
+)
+features |> filter(split == "train") |> count(fold)
+```
+
+# 6. Validate and save
+
+```{r}
+stopifnot(
+  !anyNA(features$habit_match), !anyNA(features$detour), !anyNA(features$cell),
+  all(features$Y %in% 0:1)
+)
+
+write_rds(features, "../data/processed/coupon_features.rds")
+cat("Saved", nrow(features), "rows,", ncol(features), "columns to data/processed/coupon_features.rds\n")
+```
+
+# Summary of changes
+
+| Step | Change |
+|---|---|
+| Create | `habit_match` (ordered), `detour`, `cell` (coupon x time x destination), `split`, `fold` |
+| Set aside | `temperature` (redundant with `weather`), demographics (kept for the backup question only) |
+| Split | By `respondent_id`: 80/20 train/test, 5 CV folds inside train, seed 445 |

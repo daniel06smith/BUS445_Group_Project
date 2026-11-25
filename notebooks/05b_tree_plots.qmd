@@ -1,0 +1,131 @@
+---
+title: "05b - Decision Tree Plots (rpart and partykit versions)"
+author: "BUS 445 - Team 3"
+format:
+  html:
+    code-fold: true
+---
+
+# Purpose
+
+The shallow tree (model M3 in `05_models.qmd`) is our readable rulebook. This notebook draws the **same tree** two ways so the team can pick the style that reads best:
+
+1. **Classic style (base `rpart`)**: each split node shows its condition, each leaf shows its class and counts. This is the layout used in many textbooks (for example the `tree` package in the r4sl notes).
+2. **Memo style (`partykit`)**: the variable sits in each node, the condition sits on each branch, and each leaf is a coloured box showing the share of offers accepted.
+
+Run `03_features.qmd` first. `partykit` is needed for the second chart: `install.packages("partykit")`.
+
+```{r}
+#| warning: false
+library(tidyverse)
+library(rpart)
+
+dir.create("../outputs/figures", showWarnings = FALSE, recursive = TRUE)
+```
+
+# 1. Fit the tree
+
+Same settings as model M3: depth 4, at least 100 offers per leaf, fit on **training respondents only**. Level names are shortened and the outcome is labelled, so the plots read in plain words.
+
+```{r}
+d <- read_rds("../data/processed/coupon_features.rds") |>
+  mutate(across(where(is.ordered), \(x) factor(x, ordered = FALSE))) |>
+  mutate(across(where(is.factor), droplevels))
+
+train <- d |>
+  filter(split == "train") |>
+  mutate(
+    accepted    = factor(Y, levels = c(0, 1), labels = c("Declined", "Accepted")),
+    coupon      = fct_recode(coupon, "Rest. under $20" = "Restaurant (under $20)",
+                                     "Rest. $20-50"    = "Restaurant ($20-50)"),
+    habit_match = fct_recode(habit_match, "<1" = "Less than 1", "8+" = "More than 8")
+  )
+
+tree <- rpart(
+  accepted ~ coupon + destination + time + expiration + passenger + weather +
+             habit_match + distance + detour,
+  data = train, method = "class",
+  control = rpart.control(maxdepth = 4, minbucket = 100, cp = 0.002)
+)
+
+cat("Leaves:", sum(tree$frame$var == "<leaf>"), "\n")
+```
+
+# 2. Classic style (base rpart)
+
+Read it like this: **each node's label is the condition for the left branch** (left = "yes", right = "no"). Leaves show the predicted class and the counts as declined/accepted. Branch heights are proportional to how much each split improves the fit, so the biggest drops are the most important splits.
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+draw_classic <- function() {
+  par(mar = c(1, 1, 3, 1), xpd = TRUE)
+  plot(tree, uniform = FALSE, branch = 1, margin = 0.08)
+  text(tree, use.n = TRUE, pretty = 0, cex = 0.8)
+  title("When is a coupon accepted? (left branch = condition is true)")
+}
+
+png("../outputs/figures/14a_tree_classic.png", width = 2600, height = 1200, res = 200)
+draw_classic(); invisible(dev.off())
+draw_classic()
+```
+
+# 3. Memo style (partykit)
+
+The variable is in each node, the condition is on each branch, and each leaf box shows the share of offers accepted (red = mostly declined, blue = mostly accepted) and the number of offers.
+
+```{r}
+#| fig-width: 14
+#| fig-height: 6.5
+
+if (requireNamespace("partykit", quietly = TRUE)) {
+  library(partykit)
+
+  pt <- as.party(tree)
+
+  leaf_stats <- tibble(id = pt$fitted[["(fitted)"]], y = pt$fitted[["(response)"]]) |>
+    group_by(id) |>
+    summarise(n = n(), accepted = mean(y == "Accepted"), .groups = "drop")
+
+  # custom leaf boxes: share accepted + number of offers, coloured red -> blue
+  node_accept <- function(obj) {
+    pal <- colorRampPalette(c("#e34948", "#f4f3ef", "#2a78d6"))(101)
+    rval <- function(node) {
+      s <- leaf_stats[leaf_stats$id == partykit::id_node(node), ]
+      grid::grid.rect(y = grid::unit(0.32, "npc"), height = grid::unit(0.55, "npc"),
+                      width = grid::unit(0.92, "npc"),
+                      gp = grid::gpar(fill = pal[round(100 * s$accepted) + 1], col = "grey40"))
+      grid::grid.text(sprintf("%.0f%% accept\nn = %s", 100 * s$accepted, format(s$n, big.mark = ",")),
+                      y = grid::unit(0.32, "npc"),
+                      gp = grid::gpar(cex = 0.9, fontface = "bold",
+                                      col = if (abs(s$accepted - 0.5) > 0.25) "white" else "black"))
+    }
+    class(rval) <- "grapcon_generator"
+    rval
+  }
+  class(node_accept) <- "grapcon_generator"
+
+  draw_memo <- function() {
+    plot(pt, terminal_panel = node_accept, drop_terminal = TRUE, tnex = 1.5,
+         ip_args = list(id = FALSE, fill = "#f4f3ef"),
+         ep_args = list(justmin = 8),
+         gp = grid::gpar(fontsize = 10),
+         main = "When is a coupon accepted? (boxes show share of offers accepted)")
+  }
+
+  png("../outputs/figures/14b_tree_memo.png", width = 2800, height = 1300, res = 200)
+  draw_memo(); invisible(dev.off())
+  draw_memo()
+} else {
+  message("Install partykit for this chart: install.packages('partykit')")
+}
+```
+
+# 4. The same rules as plain text
+
+Useful for the memo appendix or for checking the charts.
+
+```{r}
+print(tree)
+```

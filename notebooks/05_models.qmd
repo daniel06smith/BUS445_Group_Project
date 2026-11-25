@@ -1,0 +1,380 @@
+---
+title: "05 - Models: Predicting Stated Acceptance"
+author: "BUS 445 - Team 3"
+format:
+  html:
+    code-fold: true
+---
+
+# Purpose
+
+`04_discovery.qmd` showed *where* stated acceptance is high or low. This notebook builds models that turn context into a **probability of acceptance** for each offer. That probability is the input to the dollar case in `06`.
+
+Our sponsor's feedback set the rules, and this notebook follows them:
+
+- **Lead with a model partners can read**: logistic regression with coupon interactions, plus a shallow decision tree.
+- **Random forest is a benchmark only.** It tells us whether the readable models are leaving accuracy on the table.
+- **No accuracy as the headline.** We report **precision and lift** (how much better than average are the offers we would serve?) on **held-out respondents**, plus calibration, because the dollar case depends on the probabilities themselves.
+- **Y is stated acceptance**, not redemption.
+
+```{r}
+#| warning: false
+library(tidyverse)
+library(scales)
+library(pROC)
+library(rpart)
+library(ranger)
+
+blue <- "#2a78d6"; red <- "#e34948"
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title.position = "plot",
+          plot.title = element_text(face = "bold"))
+)
+dir.create("../outputs/figures", showWarnings = FALSE, recursive = TRUE)
+dir.create("../outputs/tables",  showWarnings = FALSE, recursive = TRUE)
+save_fig <- function(p, name, w = 9, h = 5) {
+  ggsave(file.path("../outputs/figures", paste0(name, ".png")), p, width = w, height = h, dpi = 200, bg = "white")
+  p
+}
+```
+
+# 1. Model data
+
+Predictors are the levers the product controls (coupon, expiration, passenger, weather, distance, detour), the **context** (destination and time of day combined, because they are nested in the survey design: Work is always 7AM), and the matched `habit_match`.
+
+Ordered factors are switched to plain factors so logistic-regression coefficients are readable (no polynomial contrasts). Demographics are **not** in these models; they belong to the backup question.
+
+```{r}
+d <- read_rds("../data/processed/coupon_features.rds") |>
+  mutate(row_id  = row_number(),
+         context = paste(destination, time, sep = " | "),
+         across(where(is.ordered), \(x) factor(x, ordered = FALSE)),
+         context = factor(context)) |>
+  mutate(across(where(is.factor), droplevels))
+
+train <- d |> filter(split == "train")
+test  <- d |> filter(split == "test")
+
+cat("Train:", nrow(train), "rows /", n_distinct(train$respondent_id), "respondents\n",
+    "Test: ", nrow(test),  "rows /", n_distinct(test$respondent_id),  "respondents\n")
+
+stopifnot(length(intersect(train$respondent_id, test$respondent_id)) == 0)
+```
+
+# 2. The four models
+
+| Model | What it is | Role |
+|---|---|---|
+| **M0 Category average** | `Y ~ coupon` | The naive baseline: "just use each category's average" |
+| **M1 Logistic, main effects** | all levers, no interactions | A stepping stone |
+| **M2 Logistic + coupon interactions** | every lever is allowed to work differently for each coupon | **Lead model** |
+| **M3 Shallow tree** | depth 4, at least 100 rows per leaf | Readable rulebook |
+| **M4 Random forest** | 500 trees | **Benchmark only** |
+
+```{r}
+f_m0 <- Y ~ coupon
+f_m1 <- Y ~ coupon + context + expiration + passenger + weather + habit_match + distance + detour
+f_m2 <- Y ~ coupon * (context + expiration + passenger + habit_match + distance) + weather + detour
+f_tree <- Y ~ coupon + destination + time + expiration + passenger + weather + habit_match + distance + detour
+# (destination and time are separate here so the tree's splits read as plain English)
+f_rf   <- f_m1
+
+fit_logit <- function(f, data) suppressWarnings(glm(f, family = binomial, data = data))
+pred_logit <- function(m, newdata) suppressWarnings(as.numeric(predict(m, newdata, type = "response")))
+
+fit_tree <- function(data) rpart(f_tree, data = data, method = "class",
+                                 control = rpart.control(maxdepth = 4, minbucket = 100, cp = 0.002))
+pred_tree <- function(m, newdata) as.numeric(predict(m, newdata)[, "1"])
+
+fit_rf <- function(data) ranger(update(f_rf, factor(Y) ~ .), data = data, probability = TRUE,
+                                num.trees = 500, seed = 445)
+pred_rf <- function(m, newdata) as.numeric(predict(m, newdata)$predictions[, "1"])
+
+models <- list(
+  "M0 Category average"      = list(fit = \(x) fit_logit(f_m0, x), pred = pred_logit),
+  "M1 Logistic (main)"       = list(fit = \(x) fit_logit(f_m1, x), pred = pred_logit),
+  "M2 Logistic + interactions" = list(fit = \(x) fit_logit(f_m2, x), pred = pred_logit),
+  "M3 Shallow tree"          = list(fit = fit_tree, pred = pred_tree),
+  "M4 Random forest"         = list(fit = fit_rf,   pred = pred_rf)
+)
+```
+
+# 3. How we judge a model
+
+Momentum will not serve every offer; it will serve the ones most likely to be accepted. So the natural question is: **if we serve only the top 30% (or 50%) of offers ranked by the model, how much better is acceptance than average?**
+
+- **Precision at top k%** = share of those served offers that were accepted.
+- **Lift at top k%** = that precision divided by the overall acceptance rate (1.0 = no better than random).
+- **AUC** is reported as a secondary ranking score.
+- **Brier score and log-loss** measure how good the probabilities are (lower is better), which matters because `06` multiplies by them.
+
+```{r}
+set.seed(445)
+
+metrics <- function(y, p, label) {
+  p <- pmin(pmax(p, 1e-6), 1 - 1e-6)
+  ord <- order(p, runif(length(p)), decreasing = TRUE)   # ties broken at random
+  prec_at <- function(k) mean(y[ord[seq_len(ceiling(k * length(y)))]])
+  tibble(
+    model         = label,
+    auc           = as.numeric(pROC::auc(y, p, quiet = TRUE)),
+    brier         = mean((y - p)^2),
+    logloss       = -mean(y * log(p) + (1 - y) * log(1 - p)),
+    precision_top30 = prec_at(0.30),
+    lift_top30      = prec_at(0.30) / mean(y),
+    precision_top50 = prec_at(0.50),
+    lift_top50      = prec_at(0.50) / mean(y)
+  )
+}
+```
+
+# 4. Cross-validation on training respondents
+
+Five folds, **split by respondent** (the `fold` column from `03`). Every training row gets an out-of-fold prediction from a model that never saw that person.
+
+```{r}
+cv_predict <- function(spec, data) {
+  p <- rep(NA_real_, nrow(data))
+  for (k in sort(unique(data$fold))) {
+    in_k <- data$fold == k
+    m <- spec$fit(data[!in_k, ])
+    p[in_k] <- spec$pred(m, data[in_k, ])
+  }
+  p
+}
+
+oof <- map(models, cv_predict, data = train)
+
+cv_results <- imap_dfr(oof, \(p, nm) metrics(train$Y, p, nm))
+
+cv_results |>
+  mutate(across(c(precision_top30, precision_top50), \(x) percent(x, accuracy = 0.1)),
+         across(c(auc, brier, logloss, lift_top30, lift_top50), \(x) round(x, 3)))
+write_csv(cv_results, "../outputs/tables/model_comparison_cv.csv")
+```
+
+```{r}
+p <- cv_results |>
+  select(model, AUC = auc, `Lift at top 30%` = lift_top30, `Lift at top 50%` = lift_top50) |>
+  pivot_longer(-model, names_to = "metric", values_to = "value") |>
+  mutate(model = factor(model, levels = rev(names(models))),
+         readable = str_detect(model, "M2|M3|M1|M0")) |>
+  ggplot(aes(value, model, fill = model == "M2 Logistic + interactions")) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = sprintf("%.2f", value)), hjust = 1.15, colour = "white", fontface = "bold", size = 3.5) +
+  scale_fill_manual(values = c("TRUE" = blue, "FALSE" = "#9ab4d8"), guide = "none") +
+  facet_wrap(~ metric, scales = "free_x") +
+  labs(title = str_wrap("A readable logistic model ranks offers about as well as a random forest", 60),
+       subtitle = str_wrap("Five-fold cross-validation on training respondents (people never appear on both sides)", 75),
+       x = NULL, y = NULL)
+save_fig(p, "08_model_comparison", 11, 4)
+```
+
+# 5. Are the probabilities trustworthy? (calibration)
+
+The dollar case multiplies predicted acceptance by fees and costs, so a model that ranks well but says "70%" when the truth is 55% would overstate dollars. If predicted and observed rates match across deciles, the points sit on the dashed line.
+
+```{r}
+calib <- tibble(p = oof[["M2 Logistic + interactions"]], y = train$Y) |>
+  mutate(decile = ntile(p, 10)) |>
+  group_by(decile) |>
+  summarise(predicted = mean(p), observed = mean(y), n = n(), .groups = "drop")
+calib |> mutate(across(c(predicted, observed), \(x) percent(x, accuracy = 0.1)))
+
+p <- ggplot(calib, aes(predicted, observed)) +
+  geom_abline(linetype = "dashed") +
+  geom_line(colour = blue) + geom_point(size = 2.5, colour = blue) +
+  scale_x_continuous(labels = percent, limits = c(0, 1)) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(title = str_wrap("Predicted acceptance matches what respondents said", 45),
+       subtitle = str_wrap("Lead model (M2), out-of-fold predictions grouped into deciles", 50),
+       x = "Predicted acceptance", y = "Observed acceptance")
+save_fig(p, "09_calibration", 6, 5)
+```
+
+# 6. Final check on the test respondents (used once)
+
+Each model is refit on **all** training respondents and scored on the held-out test respondents. This is the number we would quote in the memo.
+
+```{r}
+final_fits  <- map(models, \(s) s$fit(train))
+test_preds  <- map2(models, final_fits, \(s, m) s$pred(m, test))
+
+test_results <- imap_dfr(test_preds, \(p, nm) metrics(test$Y, p, nm))
+test_results |>
+  mutate(across(c(precision_top30, precision_top50), \(x) percent(x, accuracy = 0.1)),
+         across(c(auc, brier, logloss, lift_top30, lift_top50), \(x) round(x, 3)))
+write_csv(test_results, "../outputs/tables/model_comparison_test.csv")
+
+cat("Test respondents:", n_distinct(test$respondent_id),
+    "| baseline acceptance in test:", percent(mean(test$Y), accuracy = 0.1), "\n")
+```
+
+The test set has only about 85 respondents, so treat small differences between models as noise; the cross-validation table above uses far more people.
+
+# 7. Reading the lead model
+
+## What the model says about each lever (model-adjusted)
+
+For each lever we ask: *holding everything else as observed, what would average acceptance be if every offer had this level?* This separates the lever from the mix of contexts it happens to be tested in.
+
+```{r}
+m2 <- final_fits[["M2 Logistic + interactions"]]
+
+marg_means <- function(model, data, var) {
+  levs <- levels(data[[var]])
+  map_dfr(levs, \(l) {
+    dd <- data
+    dd[[var]] <- factor(l, levels = levs)
+    dd |> mutate(p = pred_logit(model, dd)) |>
+      group_by(coupon) |> summarise(p = mean(p), .groups = "drop") |>
+      mutate(level = factor(l, levels = levs))
+  })
+}
+
+cat_colours <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+
+plot_marg <- function(var, title, name, w = 8, h = 4.5) {
+  out <- marg_means(m2, train, var)
+  p <- ggplot(out, aes(level, p, colour = coupon, group = coupon)) +
+    geom_line(linewidth = 1) + geom_point(size = 2.2) +
+    scale_colour_manual(values = cat_colours, name = NULL) +
+    scale_y_continuous(labels = percent, limits = c(0, 1)) +
+    labs(title = str_wrap(title, 60), subtitle = str_wrap("Model-adjusted stated acceptance (lead model, training respondents)", 60),
+         x = NULL, y = NULL) +
+    theme(legend.position = "top")
+  save_fig(p, name, w, h)
+}
+
+plot_marg("expiration",  "Holding context fixed, a one-day window lifts acceptance in every category", "10_effect_expiration", 7.5, 5)
+plot_marg("habit_match", "Habit match is the biggest lever for bars and coffee houses",     "11_effect_habit_match", 8, 4.5)
+plot_marg("passenger",   "Passengers matter most for bars",                                  "12_effect_passenger", 8, 4.5)
+```
+
+**Two things to notice.**
+
+- **Bars and expiration.** In the raw data (`04`), one-day and two-hour bar coupons look identical (41% vs 42%). The model says a one-day window *helps* bars. The reason is the survey design: two-hour bar offers were mostly shown with friends or a partner (who accept more), while one-day bar offers were mostly shown to drivers who were alone, and only one-day bar offers were tested at Work. The model separates the passenger effect from the expiration effect; the raw averages cannot. This is a lever to confirm in the real-world A/B test, not to promise.
+- **Thin cells.** Take-away "Never" and Restaurant ($20-50) "More than 8" rest on very few offers (see `04`), so ignore the ends of those lines.
+
+Distance and detour are not shown as counterfactuals because the survey never pairs a same-direction offer with the over-25-minute band; see `04_discovery.qmd` for the observed pattern.
+
+## The shallow tree as a rulebook
+
+The chart below puts the **variable in each node** and the **condition on each branch**. Each box at the bottom shows the share of offers accepted in that group (red = mostly declined, blue = mostly accepted). It uses the `partykit` package; run `install.packages("partykit")` once if needed. For the plot only, the tree is refit on the same training rows with shorter level names; the code checks that it gives the same predictions as model M3.
+
+```{r}
+#| fig-width: 14
+#| fig-height: 6.5
+tree <- final_fits[["M3 Shallow tree"]]
+
+if (requireNamespace("partykit", quietly = TRUE)) {
+  library(partykit)
+
+  # same data, same settings, but readable level names and a labelled outcome
+  train_plot <- train |>
+    mutate(Yf = factor(Y, levels = c(0, 1), labels = c("Declined", "Accepted")),
+           coupon = fct_recode(coupon, "Rest. under $20" = "Restaurant (under $20)",
+                                       "Rest. $20-50"    = "Restaurant ($20-50)"),
+           habit_match = fct_recode(habit_match, "<1" = "Less than 1", "8+" = "More than 8"))
+
+  tree_plot <- rpart(update(f_tree, Yf ~ .), data = train_plot, method = "class",
+                     control = rpart.control(maxdepth = 4, minbucket = 100, cp = 0.002))
+  stopifnot(isTRUE(all.equal(unname(predict(tree_plot)[, "Accepted"]),
+                             pred_tree(tree, train), check.attributes = FALSE)))
+
+  pt <- as.party(tree_plot)
+  leaf_stats <- tibble(id = pt$fitted[["(fitted)"]], y = pt$fitted[["(response)"]]) |>
+    group_by(id) |> summarise(n = n(), accepted = mean(y == "Accepted"), .groups = "drop")
+
+  # terminal boxes: share accepted + number of offers, coloured red -> blue
+  node_accept <- function(obj) {
+    pal <- colorRampPalette(c("#e34948", "#f4f3ef", "#2a78d6"))(101)
+    rval <- function(node) {
+      s <- leaf_stats[leaf_stats$id == partykit::id_node(node), ]
+      grid::grid.rect(y = grid::unit(0.32, "npc"), height = grid::unit(0.55, "npc"),
+                      width = grid::unit(0.92, "npc"),
+                      gp = grid::gpar(fill = pal[round(100 * s$accepted) + 1], col = "grey40"))
+      grid::grid.text(sprintf("%.0f%% accept\nn = %s", 100 * s$accepted, format(s$n, big.mark = ",")),
+                      y = grid::unit(0.32, "npc"),
+                      gp = grid::gpar(cex = 0.9, fontface = "bold",
+                                      col = if (abs(s$accepted - 0.5) > 0.25) "white" else "black"))
+    }
+    class(rval) <- "grapcon_generator"
+    rval
+  }
+  class(node_accept) <- "grapcon_generator"
+
+  draw_tree <- function() {
+    plot(pt, terminal_panel = node_accept, drop_terminal = TRUE, tnex = 1.5,
+         ip_args = list(id = FALSE, fill = "#f4f3ef"),
+         ep_args = list(justmin = 8),
+         gp = grid::gpar(fontsize = 10),
+         main = "When is a coupon accepted? (boxes show share of offers accepted)")
+  }
+
+  png("../outputs/figures/14_decision_tree.png", width = 2800, height = 1300, res = 200)
+  draw_tree(); invisible(dev.off())
+  draw_tree()
+} else {
+  message("Install partykit for the readable tree chart: install.packages('partykit')")
+  plot(tree, uniform = TRUE, margin = 0.1); text(tree, use.n = TRUE, cex = 0.7)
+}
+print(tree)
+```
+
+# 8. Predicted vs observed by context cell
+
+A **cell** is coupon x destination x time, the unit Dana decides on. Every row gets an *honest* prediction: out-of-fold for training respondents, and test-set for test respondents. These feed `06_dollar_case.qmd`.
+
+```{r}
+scored <- bind_rows(
+  train |> mutate(p_logit = oof[["M2 Logistic + interactions"]],
+                  p_tree  = oof[["M3 Shallow tree"]],
+                  p_rf    = oof[["M4 Random forest"]],
+                  p_source = "cross-validated"),
+  test  |> mutate(p_logit = test_preds[["M2 Logistic + interactions"]],
+                  p_tree  = test_preds[["M3 Shallow tree"]],
+                  p_rf    = test_preds[["M4 Random forest"]],
+                  p_source = "test set")
+) |> arrange(row_id)
+
+stopifnot(nrow(scored) == nrow(d), !anyNA(scored$p_logit))
+
+cell_pred <- scored |>
+  group_by(cell, coupon, destination, time) |>
+  summarise(n = n(), observed = mean(Y), predicted = mean(p_logit),
+            predicted_tree = mean(p_tree), predicted_rf = mean(p_rf), .groups = "drop") |>
+  mutate(thin = n < 30) |>
+  arrange(desc(predicted))
+
+cell_pred |> slice_head(n = 8) |>
+  mutate(across(c(observed, predicted), \(x) percent(x, accuracy = 1)))
+write_csv(cell_pred, "../outputs/tables/cell_predictions.csv")
+```
+
+```{r}
+p <- cell_pred |> filter(!thin) |>
+  ggplot(aes(predicted, observed, size = n)) +
+  geom_abline(linetype = "dashed") +
+  geom_point(colour = blue, alpha = 0.7) +
+  scale_x_continuous(labels = percent, limits = c(0.2, 0.95)) +
+  scale_y_continuous(labels = percent, limits = c(0.2, 0.95)) +
+  scale_size_continuous(range = c(1.5, 6), name = "Offers in cell", labels = comma) +
+  labs(title = str_wrap("Model predictions track observed acceptance in every context cell", 50),
+       subtitle = str_wrap("Each dot is one coupon x destination x time cell with at least 30 offers", 55),
+       x = "Predicted (held-out)", y = "Observed")
+save_fig(p, "13_cell_predicted_vs_observed", 7.5, 5.5)
+```
+
+```{r}
+write_rds(scored, "../data/processed/coupon_scored.rds")
+cat("Saved", nrow(scored), "scored rows to data/processed/coupon_scored.rds\n")
+```
+
+# What `06_dollar_case.qmd` takes from this
+
+- `cell_predictions.csv` / `coupon_scored.rds`: a held-out **probability of acceptance** for every offer and every cell.
+- The lead model is calibrated, so multiplying by fees and costs is defensible, but it is still **stated acceptance**. The redemption share in the Assumption Ledger is what converts it to real-world redemptions.
+- Not yet answered: **which driver profiles does each category reach?** (our backup question), which needs a demographics-based view per category.
