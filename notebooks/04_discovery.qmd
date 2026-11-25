@@ -1,0 +1,303 @@
+---
+title: "04 - Discovery: Where Does Acceptance Come From?"
+author: "BUS 445 - Team 3"
+format:
+  html:
+    code-fold: true   # code hidden by default; the charts are the story
+---
+
+# Purpose
+
+This notebook answers Dana Foster's question, **which categories and contexts are worth launching with?**, using the order our sponsor's feedback asked for:
+
+1. Acceptance and counts by coupon category
+2. Which contexts actually exist in the survey
+3. Each category broken down by time, destination, passenger, expiration (and weather)
+4. Within each category: habit match, distance band, detour flag
+
+**Reminder: Y is a stated "yes" to a hypothetical coupon, not a redemption.** Everything here is *stated acceptance*. Turning it into dollars happens in `06` through the redemption share in our Assumption Ledger.
+
+We use the **training respondents only**, so the test set stays untouched for `05_models.qmd`. Rows from the same person are not independent, so confidence intervals are bootstrapped by respondent.
+
+```{r}
+#| warning: false
+library(tidyverse)
+library(scales)
+
+use_split <- "train"   # change to c("train", "test") only for a final all-data summary
+
+d <- read_rds("../data/processed/coupon_features.rds") |>
+  filter(split %in% use_split) |>
+  # order coupons by acceptance so charts read top = highest
+  mutate(coupon = fct_reorder(coupon, Y, mean))
+
+overall <- mean(d$Y)
+blue <- "#2a78d6"; red <- "#e34948"; grey <- "#b8b6ae"
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title.position = "plot",
+          plot.title = element_text(face = "bold"))
+)
+
+wrap <- function(x, w = 55) stringr::str_wrap(x, w)   # use inside labs() so titles wrap in narrow plot panes
+
+dir.create("../outputs/figures", showWarnings = FALSE, recursive = TRUE)
+dir.create("../outputs/tables",  showWarnings = FALSE, recursive = TRUE)
+save_fig <- function(p, name, w = 9, h = 5) {
+  ggsave(file.path("../outputs/figures", paste0(name, ".png")), p, width = w, height = h, dpi = 200, bg = "white")
+  p
+}
+
+cat("Rows:", comma(nrow(d)), "| respondents:", n_distinct(d$respondent_id),
+    "| overall stated acceptance:", percent(overall, accuracy = 0.1), "\n")
+```
+
+# 1. Acceptance and counts by coupon category
+
+```{r}
+# Bootstrap by respondent: resample whole people, not rows
+boot_ci <- function(data, group, B = 1000, seed = 445) {
+  set.seed(seed)
+  agg <- data |>
+    group_by(respondent_id, g = {{ group }}) |>
+    summarise(s = sum(Y), n = n(), .groups = "drop")
+  ids    <- unique(agg$respondent_id); k <- length(ids)
+  groups <- levels(factor(agg$g))
+  S <- N <- matrix(0, k, length(groups))
+  ri <- match(agg$respondent_id, ids); gi <- match(agg$g, groups)
+  S[cbind(ri, gi)] <- agg$s; N[cbind(ri, gi)] <- agg$n
+  draws <- sapply(seq_len(B), function(b) {
+    w <- tabulate(sample.int(k, k, replace = TRUE), k)
+    as.numeric(w %*% S) / as.numeric(w %*% N)
+  })
+  tibble(group = groups, n = colSums(N), rate = colSums(S) / colSums(N),
+         lo = apply(draws, 1, quantile, 0.025), hi = apply(draws, 1, quantile, 0.975))
+}
+
+by_coupon <- boot_ci(d, coupon) |> rename(coupon = group) |>
+  mutate(coupon = factor(coupon, levels = levels(d$coupon)))
+
+by_coupon |> mutate(across(c(rate, lo, hi), \(x) percent(x, accuracy = 0.1)))
+write_csv(by_coupon, "../outputs/tables/acceptance_by_coupon.csv")
+```
+
+```{r}
+p <- by_coupon |>
+  ggplot(aes(rate, coupon)) +
+  geom_col(fill = blue, width = 0.6) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
+  geom_vline(xintercept = overall, linetype = "dashed") +
+  geom_text(aes(x = 0.02, label = paste0(percent(rate, accuracy = 1), "  (", comma(n), " offers)")),
+            hjust = 0, colour = "white", fontface = "bold") +
+  annotate("text", x = overall, y = 5.55, label = paste0("Average ", percent(overall, accuracy = 1)),
+           hjust = -0.1, size = 3.5) +
+  scale_x_continuous(labels = percent, limits = c(0, 0.9)) +
+  labs(title = str_wrap("Take-away and cheap restaurants are accepted most; bars and pricey restaurants least", 60),
+       subtitle = wrap("Stated acceptance by coupon category (lines show a 95% interval, bootstrapped by respondent)", 70),
+       x = NULL, y = NULL)
+save_fig(p, "01_acceptance_by_coupon", 9, 4.5)
+```
+
+Stated acceptance is **not** value: Momentum earns a different fee in each category, so the highest-acceptance category is not automatically the best launch. That comparison happens in `06`.
+
+# 2. Which contexts exist?
+
+The survey is not a full cross of every condition. For example, **Work only appears at 7AM** and **Home only at 6PM and 10PM**. We can only recommend contexts that were actually tested.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+ctx_levels <- c("Work | 7AM", "Home | 6PM", "Home | 10PM",
+                "No urgent place | 10AM", "No urgent place | 2PM",
+                "No urgent place | 6PM", "No urgent place | 10PM")
+d <- d |> mutate(context = factor(
+  paste(if_else(destination == "No Urgent Place", "No urgent place", as.character(destination)),
+        time, sep = " | "),
+  levels = ctx_levels))
+stopifnot(!anyNA(d$context))
+
+p <- d |> count(coupon, context) |>
+  complete(coupon, context, fill = list(n = 0)) |>
+  ggplot(aes(coupon, context, fill = n)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = comma(n)), size = 3.3) +
+  scale_fill_gradient(low = "#f0efec", high = "#6da7ec", guide = "none") +
+  scale_x_discrete(limits = rev, labels = \(x) str_wrap(x, 12)) +   # highest-acceptance coupon on the left
+  scale_y_discrete(limits = rev) +                                    # first context at the top
+  labs(title = wrap("Nearly every coupon was tested in every real context, but sample sizes differ", 55),
+       subtitle = wrap("Number of offers (rows) by coupon and destination | time of day", 60),
+       x = NULL, y = NULL)
+save_fig(p, "02_context_coverage", 8, 6)
+```
+
+# 3. Acceptance by category and context (the cell table)
+
+This is the table Dana needs: **one number per coupon x destination x time cell**. Cells with fewer than 30 offers are greyed out, since their rates are mostly noise.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+min_n <- 30
+
+cell_table <- d |>
+  group_by(coupon, context) |>
+  summarise(n = n(), rate = mean(Y), .groups = "drop") |>
+  mutate(thin = n < min_n)
+
+p <- cell_table |>
+  mutate(rate_plot = if_else(thin, NA_real_, rate),
+         label = if_else(thin, paste0("n=", n), paste0(percent(rate, accuracy = 1), "\n(n=", comma(n), ")"))) |>
+  ggplot(aes(coupon, context, fill = rate_plot)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = label, colour = !is.na(rate_plot) & rate_plot > 0.62), size = 3.2) +
+  scale_fill_gradient(low = "#cde2fb", high = "#184f95", limits = c(0.15, 0.95),
+                      labels = percent, name = "Accepted", na.value = "#f0efec") +
+  scale_colour_manual(values = c("TRUE" = "white", "FALSE" = "black"), guide = "none") +
+  scale_x_discrete(limits = rev, labels = \(x) str_wrap(x, 12)) +
+  scale_y_discrete(limits = rev) +
+  labs(title = wrap("When you offer matters as much as what you offer", 50),
+       subtitle = wrap("Stated acceptance by coupon and context (grey = fewer than 30 offers)", 60),
+       x = NULL, y = NULL)
+save_fig(p, "03_acceptance_by_cell", 8, 7)
+
+write_csv(cell_table, "../outputs/tables/acceptance_by_cell.csv")
+```
+
+```{r}
+# Strongest and weakest cells (enough data to trust)
+cell_table |> filter(!thin) |> arrange(desc(rate)) |> slice_head(n = 6) |>
+  mutate(context = str_replace_all(context, "\n", " "), rate = percent(rate, accuracy = 1))
+cell_table |> filter(!thin) |> arrange(rate) |> slice_head(n = 6) |>
+  mutate(context = str_replace_all(context, "\n", " "), rate = percent(rate, accuracy = 1))
+```
+
+# 4. Each category, one context variable at a time
+
+For every category: how does acceptance move with time, destination, passenger, expiration and weather? One helper draws all five.
+
+```{r}
+heat_by <- function(data, var, title, w = 8, h = 4.2, name = NULL) {
+  tab <- data |>
+    group_by(coupon, level = {{ var }}) |>
+    summarise(n = n(), rate = mean(Y), .groups = "drop") |>
+    mutate(thin = n < min_n,
+           rate_plot = if_else(thin, NA_real_, rate),
+           label = if_else(thin, paste0("n=", n), paste0(percent(rate, accuracy = 1), "\n(n=", comma(n), ")")))
+  p <- ggplot(tab, aes(level, coupon, fill = rate_plot)) +
+    geom_tile(colour = "white", linewidth = 1) +
+    geom_text(aes(label = label, colour = !is.na(rate_plot) & rate_plot > 0.62), size = 3.2) +
+    scale_fill_gradient(low = "#cde2fb", high = "#184f95", limits = c(0.15, 0.95),
+                        labels = percent, name = "Accepted", na.value = "#f0efec") +
+    scale_colour_manual(values = c("TRUE" = "white", "FALSE" = "black"), guide = "none") +
+    scale_x_discrete(labels = \(x) str_wrap(x, 10)) +
+    labs(title = wrap(title, 50), subtitle = "Stated acceptance (n = offers)", x = NULL, y = NULL)
+  if (!is.null(name)) save_fig(p, name, w, h)
+  p
+}
+```
+
+```{r}
+heat_by(d, expiration, "A one-day coupon beats a two-hour coupon in most categories (not bars)",
+        w = 6, h = 4.2, name = "04_expiration")
+```
+
+Bars look flat here (one-day vs two-hour), but two-hour bar offers were mostly shown with friends or a partner, who accept more. `05_models.qmd` separates the two effects.
+
+```{r}
+heat_by(d, passenger, "Who is in the car changes the answer, especially for bars",
+        name = "05_passenger")
+```
+
+```{r}
+heat_by(d, time, "Time of day")
+heat_by(d, destination, "Destination")
+heat_by(d, weather, "Weather")
+```
+
+Note that weather and temperature are confounded in the survey design (Rainy is always 55F, Snowy always 30F), so we describe weather but do not claim a separate temperature effect.
+
+# 5. Within a category: habit match, distance, detour
+
+## Habit match: does the driver already visit this kind of place?
+
+```{r}
+#| fig-width: 9
+#| fig-height: 6.5
+habit_tab <- d |>
+  group_by(coupon, habit_match) |>
+  summarise(n = n(), rate = mean(Y), .groups = "drop")
+
+p <- habit_tab |>
+  ggplot(aes(habit_match, rate)) +
+  geom_col(aes(alpha = n >= min_n), fill = blue, width = 0.7) +
+  geom_text(aes(label = comma(n)), vjust = -0.4, size = 2.8, colour = "grey30") +
+  geom_hline(yintercept = overall, linetype = "dashed") +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.35), guide = "none") +
+  scale_y_continuous(labels = percent, limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  scale_x_discrete(labels = c("Never" = "Never", "Less than 1" = "<1", "1-3" = "1-3",
+                              "4-8" = "4-8", "More than 8" = "8+")) +
+  facet_wrap(~ coupon, ncol = 3, labeller = label_wrap_gen(18)) +
+  labs(title = wrap("People accept coupons for places they already visit, most of all for bars and coffee", 55),
+       subtitle = wrap("Acceptance by how often the driver visits that type of place per month (numbers = offers; faded = under 30)", 70),
+       x = "Visits per month to this type of place", y = "Accepted")
+save_fig(p, "06_habit_match", 9, 6.5)
+```
+
+## Distance band and detour flag
+
+```{r}
+heat_by(d, distance, "Farther offers are accepted less, with a drop past 25 minutes",
+        w = 7.5, h = 4.2, name = "07_distance")
+```
+
+```{r}
+d |>
+  filter(distance != "5-15 min") |>
+  heat_by(detour, "Among far offers: does going the opposite way matter?", w = 6.5, h = 4.2)
+```
+
+The 15-25 minute band is the only place where same-direction and detour offers can be compared; every offer over 25 minutes is a detour.
+
+# 6. Category snapshot (for the meeting and the memo)
+
+One row per category, with the main levers. "Regular" = visits that place 4+ times a month; "rare" = never or less than once a month.
+
+```{r}
+snapshot <- by_coupon |>
+  select(coupon, offers = n, acceptance = rate, ci_low = lo, ci_high = hi) |>
+  left_join(
+    d |> group_by(coupon, expiration) |> summarise(r = mean(Y), .groups = "drop") |>
+      pivot_wider(names_from = expiration, values_from = r) |>
+      transmute(coupon, one_day_minus_two_hour = `1 day` - `2 hours`),
+    by = "coupon") |>
+  left_join(
+    d |> mutate(grp = case_when(habit_match >= "4-8" ~ "regular",
+                                habit_match <= "Less than 1" ~ "rare")) |>
+      filter(!is.na(grp)) |>
+      group_by(coupon, grp) |> summarise(r = mean(Y), .groups = "drop") |>
+      pivot_wider(names_from = grp, values_from = r) |>
+      transmute(coupon, regular_minus_rare_visitors = regular - rare),
+    by = "coupon") |>
+  left_join(
+    cell_table |> filter(!thin) |> group_by(coupon) |>
+      summarise(best_cell  = str_replace_all(context[which.max(rate)], "\n", " "),
+                best_rate  = max(rate),
+                worst_cell = str_replace_all(context[which.min(rate)], "\n", " "),
+                worst_rate = min(rate), .groups = "drop"),
+    by = "coupon") |>
+  arrange(desc(acceptance))
+
+snapshot |>
+  mutate(across(c(acceptance, ci_low, ci_high, best_rate, worst_rate), \(x) percent(x, accuracy = 1)),
+         across(c(one_day_minus_two_hour, regular_minus_rare_visitors), \(x) sprintf("%+.0f pts", 100 * x)))
+
+write_csv(snapshot, "../outputs/tables/category_snapshot.csv")
+```
+
+# What `05_models.qmd` takes from this
+
+- Levers to model: coupon, expiration, time, destination, passenger, weather, `habit_match`, `distance`, `detour`.
+- Strong coupon-specific effects (habit match for bars and coffee, expiration for restaurants), so the logistic regression includes **coupon interactions**.
+- Some cells are thin; the model smooths across them, and `06` reports uncertainty around every dollar figure.

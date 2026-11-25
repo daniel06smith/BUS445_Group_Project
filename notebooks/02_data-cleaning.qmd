@@ -189,5 +189,3 @@ write_rds(clean, "../data/processed/coupon_clean.rds")
 | Relabel | coupon names, `expiration`, `age`, habit bands, `has_children` |
 | Rows | Habit NAs dropped (default); duplicates kept |
 | Output | `data/processed/coupon_clean.rds` |
-
-Not done here, on purpose: collapsing rare `occupation` levels, encoding for models, and train/test splitting. Those belong in a feature-engineering or modelling notebook.
