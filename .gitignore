@@ -2,3 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+Rplots.pdf
+DEMO_*
+data/processed/
+*.Rproj.user

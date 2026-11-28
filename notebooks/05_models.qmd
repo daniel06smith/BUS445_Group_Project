@@ -25,19 +25,50 @@ library(pROC)
 library(rpart)
 library(ranger)
 
-blue <- "#2a78d6"; red <- "#e34948"
-theme_set(
-  theme_minimal(base_size = 13) +
-    theme(panel.grid.minor = element_blank(),
-          plot.title.position = "plot",
-          plot.title = element_text(face = "bold"))
+# ---- Colour scheme: matches the team slide deck (GreatPPT "Cool and Slick" template) ----
+pal <- list(
+  green_bright = "#13E896",   # template accent 1
+  green        = "#0EBF7A",   # accent 2  (main colour)
+  green_mid    = "#08925D",   # accent 3
+  green_dark   = "#046A42",   # accent 4
+  green_deep   = "#003708",   # accent 5
+  green_pale   = "#BFFFDA",   # accent 6
+  grey_light   = "#ECECEC",
+  grey_mid     = "#B5B8B7",   # muted "everything else" colour
+  grey_dark    = "#626564"    # text grey
 )
-dir.create("../outputs/figures", showWarnings = FALSE, recursive = TRUE)
-dir.create("../outputs/tables",  showWarnings = FALSE, recursive = TRUE)
-save_fig <- function(p, name, w = 9, h = 5) {
-  ggsave(file.path("../outputs/figures", paste0(name, ".png")), p, width = w, height = h, dpi = 200, bg = "white")
-  p
+main_col <- pal$green          # replaces the old blue
+muted    <- pal$grey_mid       # replaces the old pale blue / warm grey
+
+# Montserrat is the template font; fall back to the default sans if it is not installed
+has_mont  <- requireNamespace("systemfonts", quietly = TRUE) &&
+             "Montserrat" %in% systemfonts::system_fonts()$family
+base_family <- if (has_mont) "Montserrat" else ""
+use_ragg    <- requireNamespace("ragg", quietly = TRUE)   # ragg is what lets ggsave find Montserrat
+if (use_ragg) knitr::opts_chunk$set(dev = "ragg_png")      # in-document plots use the same font-aware device
+
+theme_set(
+  theme_minimal(base_size = 13, base_family = base_family) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(colour = pal$grey_light),
+          plot.title.position = "plot",
+          plot.title = element_text(face = "bold", colour = pal$green_deep),
+          plot.subtitle = element_text(colour = pal$grey_dark),
+          axis.text = element_text(colour = pal$grey_dark),
+          axis.title = element_text(colour = pal$grey_dark))
+)
+update_geom_defaults("text", list(family = base_family))   # data labels use the same font
+fig_dir   <- "../outputs/figures"
+slide_dir <- "../outputs/figures/presentation"     # title-free versions for the slides / video
+dir.create(fig_dir,   showWarnings = FALSE, recursive = TRUE)
+dir.create(slide_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create("../outputs/tables", showWarnings = FALSE, recursive = TRUE)
+.save <- function(p, path, w, h) {
+  if (use_ragg) ggsave(path, p, width = w, height = h, dpi = 200, bg = "white", device = ragg::agg_png)
+  else          ggsave(path, p, width = w, height = h, dpi = 200, bg = "white")
 }
+save_fig   <- function(p, name, w = 9, h = 5) { .save(p, file.path(fig_dir,   paste0(name, ".png")), w, h); p }  # report figure (has title)
+save_slide <- function(p, name, w = 8, h = 4.5) { .save(p, file.path(slide_dir, paste0(name, ".png")), w, h); p } # slide figure (no title)
 ```
 
 # 1. Model data
@@ -164,7 +195,7 @@ p <- cv_results |>
   ggplot(aes(value, model, fill = model == "M2 Logistic + interactions")) +
   geom_col(width = 0.65) +
   geom_text(aes(label = sprintf("%.2f", value)), hjust = 1.15, colour = "white", fontface = "bold", size = 3.5) +
-  scale_fill_manual(values = c("TRUE" = blue, "FALSE" = "#9ab4d8"), guide = "none") +
+  scale_fill_manual(values = c("TRUE" = pal$green, "FALSE" = pal$grey_mid), guide = "none") +
   facet_wrap(~ metric, scales = "free_x") +
   labs(title = str_wrap("A readable logistic model ranks offers about as well as a random forest", 60),
        subtitle = str_wrap("Five-fold cross-validation on training respondents (people never appear on both sides)", 75),
@@ -184,8 +215,8 @@ calib <- tibble(p = oof[["M2 Logistic + interactions"]], y = train$Y) |>
 calib |> mutate(across(c(predicted, observed), \(x) percent(x, accuracy = 0.1)))
 
 p <- ggplot(calib, aes(predicted, observed)) +
-  geom_abline(linetype = "dashed") +
-  geom_line(colour = blue) + geom_point(size = 2.5, colour = blue) +
+  geom_abline(linetype = "dashed", colour = pal$grey_dark) +
+  geom_line(colour = pal$green) + geom_point(size = 2.5, colour = pal$green) +
   scale_x_continuous(labels = percent, limits = c(0, 1)) +
   scale_y_continuous(labels = percent, limits = c(0, 1)) +
   labs(title = str_wrap("Predicted acceptance matches what respondents said", 45),
@@ -234,13 +265,21 @@ marg_means <- function(model, data, var) {
   })
 }
 
-cat_colours <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+# five coupon categories: separated by lightness (and point shape) inside the template greens + greys
+cat_colours <- c("Bar"                    = pal$green_deep,
+                 "Coffee House"           = pal$green,
+                 "Restaurant (under $20)" = pal$green_mid,
+                 "Restaurant ($20-50)"    = pal$grey_mid,
+                 "Take-away"              = pal$grey_dark)
+cat_shapes  <- c("Bar" = 16, "Coffee House" = 17, "Restaurant (under $20)" = 15,
+                 "Restaurant ($20-50)" = 18, "Take-away" = 4)
 
 plot_marg <- function(var, title, name, w = 8, h = 4.5) {
   out <- marg_means(m2, train, var)
-  p <- ggplot(out, aes(level, p, colour = coupon, group = coupon)) +
-    geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  p <- ggplot(out, aes(level, p, colour = coupon, group = coupon, shape = coupon)) +
+    geom_line(linewidth = 1) + geom_point(size = 2.6) +
     scale_colour_manual(values = cat_colours, name = NULL) +
+    scale_shape_manual(values = cat_shapes, name = NULL) +
     scale_y_continuous(labels = percent, limits = c(0, 1)) +
     labs(title = str_wrap(title, 60), subtitle = str_wrap("Model-adjusted stated acceptance (lead model, training respondents)", 60),
          x = NULL, y = NULL) +
@@ -251,6 +290,49 @@ plot_marg <- function(var, title, name, w = 8, h = 4.5) {
 plot_marg("expiration",  "Holding context fixed, a one-day window lifts acceptance in every category", "10_effect_expiration", 7.5, 5)
 plot_marg("habit_match", "Habit match is the biggest lever for bars and coffee houses",     "11_effect_habit_match", 8, 4.5)
 plot_marg("passenger",   "Passengers matter most for bars",                                  "12_effect_passenger", 8, 4.5)
+```
+
+### Slide version: habit match (no title, for the video)
+
+Same model-adjusted numbers as the chart above, restyled for a slide that carries its own title and notes: no title or subtitle, larger type, Bar and Coffee House highlighted, the other three categories muted, and direct labels instead of a legend. Saved to `outputs/figures/presentation/`.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4.5
+hab <- marg_means(m2, train, "habit_match")
+focus <- c("Bar", "Coffee House")
+lab_end <- hab |> filter(level == last(levels(level))) |>
+  mutate(label = c("Restaurant (under $20)" = "Restaurant <$20", "Restaurant ($20-50)" = "Restaurant $20-50")[as.character(coupon)] |>
+                   coalesce(as.character(coupon)))
+# nudge the right-hand labels apart so none overlap
+lab_end <- lab_end |> arrange(p) |>
+  mutate(y_lab = { y <- p; for (i in seq_along(y)[-1]) y[i] <- max(y[i], y[i - 1] + 0.05); y - (mean(y) - mean(p)) })
+
+p_hab <- hab |>
+  mutate(focus = coupon %in% focus) |>
+  ggplot(aes(level, p, group = coupon, colour = coupon)) +
+  geom_line(aes(linewidth = focus, alpha = focus)) +
+  geom_point(aes(size = focus, alpha = focus)) +
+  geom_text(data = lab_end, aes(x = 5.15, y = y_lab, label = label, fontface = if_else(coupon %in% focus, "bold", "plain"),
+                                colour = if_else(coupon %in% focus, as.character(coupon), "muted")),
+            hjust = 0, size = 4.6, show.legend = FALSE) +
+  scale_colour_manual(values = c("Bar" = pal$green_deep, "Coffee House" = pal$green,
+                                 "Restaurant (under $20)" = pal$grey_mid, "Restaurant ($20-50)" = pal$grey_mid,
+                                 "Take-away" = pal$grey_mid, "muted" = pal$grey_dark), guide = "none") +
+  scale_linewidth_manual(values = c("TRUE" = 1.9, "FALSE" = 0.8), guide = "none") +
+  scale_size_manual(values = c("TRUE" = 3.6, "FALSE" = 1.8), guide = "none") +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.85), guide = "none") +
+  scale_y_continuous(labels = percent, limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_x_discrete(expand = expansion(add = c(0.3, 0.2))) +
+  coord_cartesian(clip = "off") +
+  labs(x = "How often the driver already goes to this type of place", y = "Acceptance") +
+  theme_minimal(base_size = 16, base_family = base_family) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(),
+        panel.grid.major = element_line(colour = pal$grey_light),
+        axis.text = element_text(colour = pal$grey_dark), axis.title = element_text(colour = pal$grey_dark),
+        axis.title.x = element_text(size = 13, margin = margin(t = 8)),
+        plot.margin = margin(8, 150, 8, 8))
+save_slide(p_hab, "habit_match_slide", 8, 4.5)
 ```
 
 **Two things to notice.**
@@ -304,7 +386,7 @@ p_imp <- lever_imp |>
   ggplot(aes(auc_lost, feature, fill = type)) +
   geom_col(width = 0.65) +
   geom_text(aes(label = sprintf("-%.3f", auc_lost)), hjust = -0.15, size = 4.2) +
-  scale_fill_manual(values = c("Built by us" = blue, "Original survey field" = "#b8b6ae"), name = NULL) +
+  scale_fill_manual(values = c("Built by us" = pal$green, "Original survey field" = pal$grey_mid), name = NULL) +
   scale_x_continuous(expand = expansion(mult = c(0, 0.18))) +
   labs(title = str_wrap("Habit match is the feature that matters most", 55),
        subtitle = str_wrap(sprintf("Drop in cross-validated AUC when the lever is removed from the lead model (full model: %.3f)", full_auc), 70),
@@ -313,11 +395,32 @@ p_imp <- lever_imp |>
 save_fig(p_imp, "15_feature_importance", 8, 4.5)
 ```
 
+Slide version (no title; habit match in green, everything else muted):
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4.2
+p_imp_slide <- lever_imp |>
+  mutate(feature = fct_reorder(feature, auc_lost), top = feature == "Habit match") |>
+  ggplot(aes(auc_lost, feature, fill = top)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = sprintf("-%.3f", auc_lost), colour = top, fontface = if_else(top, "bold", "plain")),
+            hjust = -0.15, size = 5) +
+  scale_fill_manual(values = c("TRUE" = pal$green, "FALSE" = pal$grey_mid), guide = "none") +
+  scale_colour_manual(values = c("TRUE" = pal$green_deep, "FALSE" = pal$grey_dark), guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.2))) +
+  labs(x = "Predictive accuracy lost without it (AUC)", y = NULL) +
+  theme_minimal(base_size = 16, base_family = base_family) +
+  theme(panel.grid = element_blank(), axis.text.x = element_blank(),
+        axis.text.y = element_text(colour = pal$grey_dark), axis.title = element_text(colour = pal$grey_dark))
+save_slide(p_imp_slide, "feature_importance_slide", 8, 4.2)
+```
+
 This is overall importance, not per category: passengers matter little overall but a lot for bars (see the passenger chart above).
 
 ## The shallow tree as a rulebook
 
-The chart below puts the **variable in each node** and the **condition on each branch**. Each box at the bottom shows the share of offers accepted in that group (red = mostly declined, blue = mostly accepted). It uses the `partykit` package; run `install.packages("partykit")` once if needed. For the plot only, the tree is refit on the same training rows with shorter level names; the code checks that it gives the same predictions as model M3.
+The chart below puts the **variable in each node** and the **condition on each branch**. Each box at the bottom shows the share of offers accepted in that group (grey = mostly declined, green = mostly accepted). It uses the `partykit` package; run `install.packages("partykit")` once if needed. For the plot only, the tree is refit on the same training rows with shorter level names; the code checks that it gives the same predictions as model M3.
 
 ```{r}
 #| fig-width: 14
@@ -343,9 +446,9 @@ if (requireNamespace("partykit", quietly = TRUE)) {
   leaf_stats <- tibble(id = pt$fitted[["(fitted)"]], y = pt$fitted[["(response)"]]) |>
     group_by(id) |> summarise(n = n(), accepted = mean(y == "Accepted"), .groups = "drop")
 
-  # terminal boxes: share accepted + number of offers, coloured red -> blue
+  # terminal boxes: share accepted + number of offers, coloured grey -> green
   node_accept <- function(obj) {
-    pal <- colorRampPalette(c("#e34948", "#f4f3ef", "#2a78d6"))(101)
+    pal <- colorRampPalette(c(pal$grey_dark, pal$grey_light, pal$green_mid))(101)
     rval <- function(node) {
       s <- leaf_stats[leaf_stats$id == partykit::id_node(node), ]
       grid::grid.rect(y = grid::unit(0.32, "npc"), height = grid::unit(0.55, "npc"),
@@ -363,9 +466,9 @@ if (requireNamespace("partykit", quietly = TRUE)) {
 
   draw_tree <- function() {
     plot(pt, terminal_panel = node_accept, drop_terminal = TRUE, tnex = 1.5,
-         ip_args = list(id = FALSE, fill = "#f4f3ef"),
+         ip_args = list(id = FALSE, fill = pal$grey_light),
          ep_args = list(justmin = 8),
-         gp = grid::gpar(fontsize = 10),
+         gp = grid::gpar(fontsize = 10, fontfamily = base_family),
          main = "When is a coupon accepted? (boxes show share of offers accepted)")
   }
 
@@ -413,7 +516,7 @@ write_csv(cell_pred, "../outputs/tables/cell_predictions.csv")
 p <- cell_pred |> filter(!thin) |>
   ggplot(aes(predicted, observed, size = n)) +
   geom_abline(linetype = "dashed") +
-  geom_point(colour = blue, alpha = 0.7) +
+  geom_point(colour = pal$green, alpha = 0.75) +
   scale_x_continuous(labels = percent, limits = c(0.2, 0.95)) +
   scale_y_continuous(labels = percent, limits = c(0.2, 0.95)) +
   scale_size_continuous(range = c(1.5, 6), name = "Offers in cell", labels = comma) +
