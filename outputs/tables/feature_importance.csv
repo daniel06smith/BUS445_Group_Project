@@ -1,0 +1,7 @@
+feature,auc_lost,type
+Habit match,0.05317956315316963,Built by us
+Context (destination x time),0.015248906164910925,Built by us
+Expiration,0.011606797898909726,Original survey field
+Distance and detour,0.0032572932660671627,Built by us
+Passengers,0.0021212270130820388,Original survey field
+Weather,0.0014164020726431525,Original survey field
