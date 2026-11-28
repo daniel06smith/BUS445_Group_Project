@@ -260,6 +260,61 @@ plot_marg("passenger",   "Passengers matter most for bars",                     
 
 Distance and detour are not shown as counterfactuals because the survey never pairs a same-direction offer with the over-25-minute band; see `04_discovery.qmd` for the observed pattern.
 
+## Which levers matter most?
+
+For the video and memo: how much predictive accuracy does the lead model lose when one lever is removed? We refit M2 without the lever and compare cross-validated AUC (folds grouped by respondent, training data only). Distance and detour overlap, so they are removed together.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4.5
+build_f <- function(drop = NULL) {                       # M2 minus the dropped levers
+  keep  <- setdiff(c("context", "expiration", "passenger", "habit_match", "distance"), drop)
+  extra <- setdiff(c("weather", "detour"), drop)
+  as.formula(paste("Y ~", paste(c(paste0("coupon * (", paste(keep, collapse = " + "), ")"), extra), collapse = " + ")))
+}
+cv_auc <- function(f) {
+  oof <- numeric(nrow(train))
+  for (k in sort(unique(train$fold))) {
+    m <- fit_logit(f, train[train$fold != k, ])
+    oof[train$fold == k] <- pred_logit(m, train[train$fold == k, ])
+  }
+  as.numeric(pROC::auc(train$Y, oof, quiet = TRUE))
+}
+
+full_auc <- cv_auc(build_f())
+stopifnot(abs(full_auc - cv_results$auc[cv_results$model == "M2 Logistic + interactions"]) < 0.002)   # matches section 4
+
+lever_groups <- list("Habit match"                  = "habit_match",
+                     "Context (destination x time)" = "context",
+                     "Expiration"                   = "expiration",
+                     "Passengers"                   = "passenger",
+                     "Weather"                      = "weather",
+                     "Distance and detour"          = c("distance", "detour"))
+built <- c("Habit match", "Context (destination x time)", "Distance and detour")   # features we engineered
+
+lever_imp <- tibble(feature = names(lever_groups)) |>
+  mutate(auc_lost = map_dbl(lever_groups, \(v) full_auc - cv_auc(build_f(v))),
+         type = if_else(feature %in% built, "Built by us", "Original survey field")) |>
+  arrange(desc(auc_lost))
+write_csv(lever_imp, "../outputs/tables/feature_importance.csv")
+print(lever_imp)
+
+p_imp <- lever_imp |>
+  mutate(feature = fct_reorder(feature, auc_lost)) |>
+  ggplot(aes(auc_lost, feature, fill = type)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = sprintf("-%.3f", auc_lost)), hjust = -0.15, size = 4.2) +
+  scale_fill_manual(values = c("Built by us" = blue, "Original survey field" = "#b8b6ae"), name = NULL) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(title = str_wrap("Habit match is the feature that matters most", 55),
+       subtitle = str_wrap(sprintf("Drop in cross-validated AUC when the lever is removed from the lead model (full model: %.3f)", full_auc), 70),
+       x = "Predictive accuracy lost without it (AUC)", y = NULL) +
+  theme(panel.grid.major.y = element_blank(), legend.position = "top")
+save_fig(p_imp, "15_feature_importance", 8, 4.5)
+```
+
+This is overall importance, not per category: passengers matter little overall but a lot for bars (see the passenger chart above).
+
 ## The shallow tree as a rulebook
 
 The chart below puts the **variable in each node** and the **condition on each branch**. Each box at the bottom shows the share of offers accepted in that group (red = mostly declined, blue = mostly accepted). It uses the `partykit` package; run `install.packages("partykit")` once if needed. For the plot only, the tree is refit on the same training rows with shorter level names; the code checks that it gives the same predictions as model M3.
